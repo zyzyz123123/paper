@@ -269,7 +269,8 @@ class PDFConverter:
         code: int,
         name: str,
         year: int,
-        pdf_url: str
+        pdf_url: str,
+        skip_exist_check: bool = False
     ) -> bool:
         """处理单个文件的下载和转换。
         
@@ -278,6 +279,7 @@ class PDFConverter:
             name: 公司简称
             year: 年份
             pdf_url: PDF下载链接
+            skip_exist_check: 是否跳过存在性检查（用于多进程模式）
             
         Returns:
             处理是否成功
@@ -288,8 +290,8 @@ class PDFConverter:
         txt_file_path = os.path.join(self.config.txt_dir, f"{base_name}.txt")
         
         try:
-            # 检查TXT是否已存在
-            if os.path.exists(txt_file_path):
+            # 检查TXT是否已存在（除非已在外部检查过）
+            if not skip_exist_check and os.path.exists(txt_file_path):
                 logging.info(f"文件已存在，跳过: {base_name}.txt")
                 return True
             
@@ -318,10 +320,24 @@ class PDFConverter:
 
 
 
-def _process_task(args: Tuple) -> bool:
-    """多进程任务包装函数。"""
+def _process_task(args: Tuple) -> Tuple[bool, str, str]:
+    """多进程任务包装函数。
+    
+    Returns:
+        (是否成功, 状态, 文件标识)
+        状态: "success", "skipped", "failed"
+    """
     converter, code, name, year, pdf_url = args
-    return converter.process_single_file(code, name, year, pdf_url)
+    file_id = f"{code:06}_{name}_{year}"
+    
+    # 检查TXT是否已存在（提前检查，避免重复日志）
+    txt_file_path = os.path.join(converter.config.txt_dir, f"{converter._sanitize_filename(file_id)}.txt")
+    if os.path.exists(txt_file_path):
+        return (True, "skipped", file_id)
+    
+    success = converter.process_single_file(code, name, year, pdf_url)
+    status = "success" if success else "failed"
+    return (success, status, file_id)
 
 
 class AnnualReportProcessor:
@@ -330,6 +346,7 @@ class AnnualReportProcessor:
     def __init__(self, config: ConverterConfig) -> None:
         self.config = config
         self.converter = PDFConverter(config)
+        self.failed_records = []  # 记录失败的文件
     
     def _load_excel_data(self) -> Optional[pd.DataFrame]:
         """加载Excel数据。"""
@@ -370,8 +387,26 @@ class AnnualReportProcessor:
         logging.info(f"找到 {len(filtered)} 条 {self.config.target_year} 年的记录")
         return filtered
     
-    def run(self) -> None:
-        """执行批量处理流程。"""
+    def _save_failed_records(self, year: int) -> None:
+        """保存失败记录到文件。"""
+        if not self.failed_records:
+            return
+        
+        failed_file = f"failed_records_{year}.txt"
+        try:
+            with open(failed_file, 'w', encoding='utf-8') as f:
+                for record in self.failed_records:
+                    f.write(f"{record}\n")
+            logging.info(f"失败记录已保存到: {failed_file}")
+        except Exception as e:
+            logging.error(f"保存失败记录出错: {e}")
+    
+    def run(self) -> Tuple[int, int, int]:
+        """执行批量处理流程。
+        
+        Returns:
+            (成功数, 跳过数, 失败数)
+        """
         logging.info("="*60)
         logging.info("年报批量下载转换程序启动")
         logging.info(f"目标年份: {self.config.target_year}")
@@ -381,17 +416,17 @@ class AnnualReportProcessor:
         # 加载数据
         df = self._load_excel_data()
         if df is None:
-            return
+            return (0, 0, 0)
         
         # 准备目录
         if not self._prepare_directories():
-            return
+            return (0, 0, 0)
         
         # 过滤数据
         filtered_df = self._filter_data_by_year(df)
         if filtered_df.empty:
             logging.warning(f"未找到 {self.config.target_year} 年的数据")
-            return
+            return (0, 0, 0)
         
         # 准备任务列表
         tasks = [
@@ -399,30 +434,174 @@ class AnnualReportProcessor:
             for _, row in filtered_df.iterrows()
         ]
         
+        total = len(tasks)
+        
         # 多进程处理
         worker_count = self.config.processes or min(cpu_count(), len(tasks))
-        logging.info(f"使用 {worker_count} 个进程处理 {len(tasks)} 个文件")
+        logging.info(f"使用 {worker_count} 个进程处理 {total} 个文件")
         
         success_count = 0
+        skipped_count = 0
+        failed_count = 0
+        self.failed_records = []
+        
+        # 使用 imap_unordered 以便实时显示进度
         with Pool(processes=worker_count) as pool:
-            results = pool.map(_process_task, tasks)
-            success_count = sum(results)
+            for idx, result in enumerate(pool.imap_unordered(_process_task, tasks), 1):
+                success, status, file_id = result
+                
+                if status == "success":
+                    success_count += 1
+                elif status == "skipped":
+                    skipped_count += 1
+                else:  # failed
+                    failed_count += 1
+                    self.failed_records.append(file_id)
+                
+                # 显示进度
+                if idx % 10 == 0 or idx == total:
+                    progress = (idx / total) * 100
+                    print(f"\r进度: {idx}/{total} ({progress:.1f}%) | 成功: {success_count} | 跳过: {skipped_count} | 失败: {failed_count}", end='', flush=True)
+        
+        print()  # 换行
+        
+        # 保存失败记录
+        if self.failed_records:
+            self._save_failed_records(self.config.target_year)
         
         # 输出统计
         logging.info("="*60)
-        logging.info(f"处理完成: 成功 {success_count}/{len(tasks)}")
+        logging.info(f"处理完成!")
+        logging.info(f"总数: {total}")
+        logging.info(f"新处理成功: {success_count}")
+        logging.info(f"已存在跳过: {skipped_count}")
+        logging.info(f"处理失败: {failed_count}")
         logging.info("="*60)
+        
+        return (success_count, skipped_count, failed_count)
+    
+    def retry_failed(self, failed_file: Optional[str] = None) -> Tuple[int, int]:
+        """重试失败的记录。
+        
+        Args:
+            failed_file: 失败记录文件路径，默认为 failed_records_{year}.txt
+            
+        Returns:
+            (成功数, 仍失败数)
+        """
+        if failed_file is None:
+            failed_file = f"failed_records_{self.config.target_year}.txt"
+        
+        if not os.path.exists(failed_file):
+            logging.error(f"失败记录文件不存在: {failed_file}")
+            return (0, 0)
+        
+        logging.info("="*60)
+        logging.info("重试失败记录模式")
+        logging.info(f"失败记录文件: {failed_file}")
+        logging.info("="*60)
+        
+        # 读取失败记录
+        with open(failed_file, 'r', encoding='utf-8') as f:
+            failed_ids = [line.strip() for line in f if line.strip()]
+        
+        if not failed_ids:
+            logging.info("没有需要重试的记录")
+            return (0, 0)
+        
+        logging.info(f"发现 {len(failed_ids)} 条失败记录需要重试")
+        
+        # 加载原始Excel数据
+        df = self._load_excel_data()
+        if df is None:
+            return (0, 0)
+        
+        # 过滤出失败的记录
+        filtered_df = self._filter_data_by_year(df)
+        
+        # 构建文件ID到数据的映射
+        retry_tasks = []
+        for _, row in filtered_df.iterrows():
+            file_id = f"{row['公司代码']:06}_{row['公司简称']}_{row['年份']}"
+            # 清理文件名以匹配
+            clean_id = re.sub(r'[\\/:*?"<>|]', '', file_id)
+            if clean_id in failed_ids or file_id in failed_ids:
+                retry_tasks.append((
+                    self.converter,
+                    row['公司代码'],
+                    row['公司简称'],
+                    row['年份'],
+                    row['年报链接']
+                ))
+        
+        if not retry_tasks:
+            logging.warning("未找到匹配的失败记录")
+            return (0, 0)
+        
+        logging.info(f"匹配到 {len(retry_tasks)} 条记录进行重试")
+        
+        total = len(retry_tasks)
+        success_count = 0
+        still_failed = []
+        
+        # 单进程重试（更容易排查问题）
+        for idx, task in enumerate(retry_tasks, 1):
+            _, code, name, year, pdf_url = task
+            file_id = f"{code:06}_{name}_{year}"
+            
+            success = self.converter.process_single_file(code, name, year, pdf_url)
+            
+            if success:
+                success_count += 1
+                logging.info(f"[{idx}/{total}] 重试成功: {file_id}")
+            else:
+                still_failed.append(file_id)
+                logging.warning(f"[{idx}/{total}] 重试仍失败: {file_id}")
+            
+            # 显示进度
+            if idx % 10 == 0 or idx == total:
+                progress = (idx / total) * 100
+                print(f"\r重试进度: {idx}/{total} ({progress:.1f}%)", end='', flush=True)
+        
+        print()  # 换行
+        
+        # 更新失败记录文件
+        if still_failed:
+            with open(failed_file, 'w', encoding='utf-8') as f:
+                for record in still_failed:
+                    f.write(f"{record}\n")
+            logging.info(f"仍失败的记录已更新到: {failed_file}")
+        else:
+            # 删除失败记录文件
+            try:
+                os.remove(failed_file)
+                logging.info(f"所有重试成功，已删除失败记录文件: {failed_file}")
+            except Exception:
+                pass
+        
+        # 输出统计
+        logging.info("="*60)
+        logging.info(f"重试完成!")
+        logging.info(f"重试总数: {total}")
+        logging.info(f"成功: {success_count}")
+        logging.info(f"仍失败: {len(still_failed)}")
+        logging.info("="*60)
+        
+        return (success_count, len(still_failed))
 
 
 if __name__ == '__main__':
     # ==================== 配置区域 ====================
     
+    # 运行模式: "full" 完整处理, "retry" 重试失败记录
+    MODE = "full"
+    
     # 是否删除转换后的PDF文件（节省磁盘空间）
     DELETE_PDF = False
     
     # 批量模式：年份区间（包含起始和结束年份）
-    START_YEAR = 2012
-    END_YEAR = 2014  # 先处理已爬取的三年，后续爬完再改
+    START_YEAR = 2024
+    END_YEAR = 2024  # 先处理已爬取的三年，后续爬完再改
     
     # 下载配置
     MAX_RETRIES = 3  # 最大重试次数
@@ -452,6 +631,12 @@ if __name__ == '__main__':
         )
         
         processor = AnnualReportProcessor(config)
-        processor.run()
+        
+        if MODE == "retry":
+            # 重试失败记录模式
+            processor.retry_failed()
+        else:
+            # 完整处理模式
+            processor.run()
         
         print(f"\n{year}年年报处理完毕\n")

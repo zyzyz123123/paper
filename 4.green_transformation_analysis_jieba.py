@@ -2,13 +2,13 @@
 # -*- coding: UTF-8 -*-
 '''
 @Project ：Annualreport_tools
-@File    ：4.green_transformation_analysis.py
+@File    ：4.green_transformation_analysis_jieba.py
 @IDE     ：PyCharm
 @Author  ：lingxiaotian
 @Date    ：2026/02/01
-@Description: 绿色化转型关键词分析脚本
+@Description: 绿色化转型关键词分析脚本（jieba分词版本）
     - 读取113个绿色化转型关键词
-    - 统计年报中关键词词数和年报总词数
+    - 使用jieba分词统计年报中关键词词数和年报总词数
     - 计算绿色化转型词频 = 绿色化转型词数 / 年报词数
     - 计算 log后的绿色化转型词频 = ln(词频 + 1)
     - 与公司元数据合并，输出完整表格
@@ -25,11 +25,13 @@ import logging
 import math
 import os
 import re
+from collections import Counter
 from dataclasses import dataclass
 from multiprocessing import Pool, cpu_count
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+import jieba
 import pandas as pd
 
 # 日志配置
@@ -190,30 +192,30 @@ class CompanyInfoLoader:
         return result
 
 
-def count_chinese_chars(text: str) -> int:
-    """统计文本中的中文字符数量（作为年报词数）。
-    
-    Args:
-        text: 文本内容
-        
-    Returns:
-        中文字符数量
-    """
-    # 匹配中文字符（基本汉字范围）
-    chinese_chars = re.findall(r'[\u4e00-\u9fff]', text)
-    return len(chinese_chars)
+# 全局变量，用于多进程共享关键词集合
+_global_keywords_set = None
 
 
-def analyze_single_file(args: Tuple) -> Optional[Dict]:
-    """分析单个TXT文件的关键词。
+def init_worker(keywords: List[str]):
+    """初始化工作进程，加载关键词到jieba词典。"""
+    global _global_keywords_set
+    _global_keywords_set = set(keywords)
+    
+    # 将关键词添加到jieba词典，提高分词准确率
+    for word in keywords:
+        jieba.add_word(word)
+
+
+def analyze_single_file_jieba(file_path: str) -> Optional[Dict]:
+    """使用jieba分词分析单个TXT文件的关键词。
     
     Args:
-        args: (file_path, keywords) 元组
+        file_path: 文件路径
         
     Returns:
         分析结果字典
     """
-    file_path, keywords = args
+    global _global_keywords_set
     
     try:
         # 解析文件名：000001_平安银行_2023.txt
@@ -240,12 +242,22 @@ def analyze_single_file(args: Tuple) -> Optional[Dict]:
             logging.warning(f"文件内容为空: {filename}")
             return None
         
-        # 统计年报词数（中文字符数）
-        total_word_count = count_chinese_chars(content)
+        # 使用jieba分词
+        words = list(jieba.cut(content))
         
-        # 直接在原文中统计关键词词频
-        # 对于专业术语（如"绿色发展"、"可持续发展"），字符串匹配更准确
-        green_word_count = sum(content.count(kw) for kw in keywords)
+        # 过滤掉空白词和标点符号，只保留有意义的词
+        # 中文词：至少包含一个中文字符
+        chinese_pattern = re.compile(r'[\u4e00-\u9fff]')
+        meaningful_words = [w for w in words if chinese_pattern.search(w)]
+        
+        # 统计年报总词数（使用中文字符数，与字符串匹配版保持一致）
+        total_word_count = len(chinese_pattern.findall(content))
+        
+        # 使用Counter统计词频
+        word_counts = Counter(meaningful_words)
+        
+        # 统计所有关键词的词频并求和
+        green_word_count = sum(word_counts.get(kw, 0) for kw in _global_keywords_set)
         
         # 计算绿色化转型词频 = 绿色化转型词数 / 年报词数
         if total_word_count > 0:
@@ -271,8 +283,8 @@ def analyze_single_file(args: Tuple) -> Optional[Dict]:
         return None
 
 
-class GreenTransformationAnalyzer:
-    """绿色化转型分析器主类。"""
+class GreenTransformationAnalyzerJieba:
+    """绿色化转型分析器主类（jieba版本）。"""
     
     def __init__(self, config: GreenAnalysisConfig):
         self.config = config
@@ -282,6 +294,7 @@ class GreenTransformationAnalyzer:
     def _load_keywords(self) -> None:
         """加载关键词。"""
         self.keywords = KeywordLoader.load_from_excel(self.config.keywords_file)
+        logging.info(f"关键词列表前10个: {self.keywords[:10]}")
     
     def _load_company_info(self) -> None:
         """加载公司元数据。"""
@@ -364,7 +377,7 @@ class GreenTransformationAnalyzer:
     def run(self) -> None:
         """执行分析流程。"""
         logging.info("=" * 60)
-        logging.info("绿色化转型关键词分析启动")
+        logging.info("绿色化转型关键词分析启动（jieba分词版本）")
         logging.info(f"年份范围: {self.config.start_year} - {self.config.end_year}")
         logging.info(f"TXT文件夹: {self.config.txt_folder}")
         logging.info(f"关键词文件: {self.config.keywords_file}")
@@ -384,21 +397,22 @@ class GreenTransformationAnalyzer:
             logging.error("未找到符合条件的TXT文件")
             return
         
-        # 准备任务
-        tasks = [(f, self.keywords) for f in txt_files]
-        
         # 多进程分析
-        worker_count = self.config.processes or min(cpu_count(), len(tasks))
-        logging.info(f"使用 {worker_count} 个进程处理 {len(tasks)} 个文件")
+        worker_count = self.config.processes or min(cpu_count(), len(txt_files))
+        logging.info(f"使用 {worker_count} 个进程处理 {len(txt_files)} 个文件")
         
         results = []
-        with Pool(processes=worker_count) as pool:
-            for i, result in enumerate(pool.imap_unordered(analyze_single_file, tasks)):
+        with Pool(
+            processes=worker_count,
+            initializer=init_worker,
+            initargs=(self.keywords,)
+        ) as pool:
+            for i, result in enumerate(pool.imap_unordered(analyze_single_file_jieba, txt_files)):
                 results.append(result)
                 
                 # 显示进度
-                progress = (i + 1) / len(tasks) * 100
-                print(f"\r分析进度: {i + 1}/{len(tasks)} ({progress:.1f}%)", end='', flush=True)
+                progress = (i + 1) / len(txt_files) * 100
+                print(f"\r分析进度: {i + 1}/{len(txt_files)} ({progress:.1f}%)", end='', flush=True)
         
         print()  # 换行
         
@@ -443,8 +457,8 @@ if __name__ == '__main__':
     # 需要包含列：证券代码、行业代码、行业名称、所属省份、所属省份代码、所属城市、所属城市代码
     COMPANY_INFO_FILE = "公司基础信息表.xlsx"
     
-    # 输出文件路径
-    OUTPUT_FILE = "绿色化转型分析结果.xlsx"
+    # 输出文件路径（jieba版本）
+    OUTPUT_FILE = "绿色化转型分析结果_jieba.xlsx"
     
     # 年份范围
     START_YEAR = 2024
@@ -465,10 +479,10 @@ if __name__ == '__main__':
         processes=PROCESSES,
     )
     
-    analyzer = GreenTransformationAnalyzer(config)
+    analyzer = GreenTransformationAnalyzerJieba(config)
     analyzer.run()
     
     print("\n提示：")
-    print("1. 如果行业/地区信息为空，请检查公司元数据文件是否存在且格式正确")
-    print("2. TXT文件命名格式需为: 股票代码_公司简称_年份.txt (如: 000001_平安银行_2023.txt)")
-    print("3. 公司元数据文件需包含: 证券代码、行业代码、行业名称、所属省份、所属省份代码、所属城市、所属城市代码")
+    print("1. 本脚本使用jieba分词，年报词数为分词后的有效中文词数量")
+    print("2. 关键词已添加到jieba词典，提高分词准确率")
+    print("3. 如需对比字符串匹配版本，请运行 4.green_transformation_analysis.py")

@@ -30,7 +30,6 @@ env/
 *.TXT
 !requirements.txt
 *.csv
-*.xlsx
 *.xlsm
 output/
 data/
