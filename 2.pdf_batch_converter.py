@@ -600,8 +600,8 @@ if __name__ == '__main__':
     DELETE_PDF = False
     
     # 批量模式：年份区间（包含起始和结束年份）
-    START_YEAR = 2024
-    END_YEAR = 2024  # 先处理已爬取的三年，后续爬完再改
+    START_YEAR = 2022
+    END_YEAR = 2022   
     
     # 下载配置
     MAX_RETRIES = 3  # 最大重试次数

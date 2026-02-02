@@ -332,13 +332,22 @@ class GreenTransformationAnalyzer:
 
 
 if __name__ == '__main__':
+    START_YEAR = 2023
+    END_YEAR = 2023
+    
+    # 生成带年份的输出文件名
+    if START_YEAR == END_YEAR:
+        output_filename = f"绿色化转型分析结果_final_{START_YEAR}.xlsx"
+    else:
+        output_filename = f"绿色化转型分析结果_final_{START_YEAR}-{END_YEAR}.xlsx"
+    
     config = GreenAnalysisConfig(
         txt_folder="年报文件",
         keywords_file="113个绿色化转型关键词.xlsx",
         company_info_file="公司基础信息表.xlsx",
-        output_file="绿色化转型分析结果_final.xlsx",
-        start_year=2024,
-        end_year=2024,
+        output_file=output_filename,
+        start_year=START_YEAR,
+        end_year=END_YEAR,
     )
     
     analyzer = GreenTransformationAnalyzer(config)
