@@ -437,7 +437,7 @@ if __name__ == '__main__':
     TXT_FOLDER = "年报文件"
     
     # 113个绿色化转型关键词Excel文件路径
-    KEYWORDS_FILE = "113个绿色化转型关键词.xlsx"
+    KEYWORDS_FILE = "数字化转型关键词(1).xlsx"
     
     # 公司元数据Excel文件路径
     # 需要包含列：证券代码、行业代码、行业名称、所属省份、所属省份代码、所属城市、所属城市代码
@@ -447,7 +447,7 @@ if __name__ == '__main__':
     OUTPUT_FILE = "绿色化转型分析结果.xlsx"
     
     # 年份范围
-    START_YEAR = 2024
+    START_YEAR = 2011
     END_YEAR = 2024
     
     # 进程数（None表示自动根据CPU核心数调整）
